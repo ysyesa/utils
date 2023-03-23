@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+from datetime import datetime
+import argparse
+import boto3
+import json
+
+CLOUDWATCH_CLIENT = boto3.client("cloudwatch")
+DIMENSIONS = {}
+def get_cloudwatch_metric_dimensions_for_s3_bucket_size_bytes():
+  res = CLOUDWATCH_CLIENT.list_metrics(Namespace="AWS/S3")
+  for metric in res["Metrics"]:
+    if metric["MetricName"] != "BucketSizeBytes":
+      continue
+    bucket_name = ""
+    for dimension in metric["Dimensions"]:
+      if dimension["Name"] == "BucketName":
+        bucket_name = dimension["Value"]
+    if bucket_name == "":
+      continue
+    if bucket_name not in DIMENSIONS:
+      DIMENSIONS[bucket_name] = []
+    DIMENSIONS[bucket_name].append(metric["Dimensions"])
+get_cloudwatch_metric_dimensions_for_s3_bucket_size_bytes()
+
+# The period is fixed to 86400 seconds, which is 1 day
+def get_cloudwatch_query_structure_for_s3_bucket_size_bytes(id, dimension):
+  return {
+    "Id": id,
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/S3",
+        "MetricName": "BucketSizeBytes",
+        "Dimensions": dimension
+      },
+      "Period": 86400,
+      "Stat": "Sum"
+    }
+  }
+
+def get_cloudwatch_metric_data_s3_bucket_size_bytes_for_single_s3_bucket(bucket_name, start_time, end_time):
+  if bucket_name not in DIMENSIONS:
+    raise Exception(f'{bucket_name} bucket not in Cloudwatch')
+  dimension = DIMENSIONS[bucket_name][0]
+  storage_type = ""
+  for each in dimension:
+    if each["Name"] == "StorageType":
+      storage_type = each["Value"]
+  assert(storage_type != "")
+
+  query_id = storage_type.lower()
+  query = get_cloudwatch_query_structure_for_s3_bucket_size_bytes(query_id, dimension)
+  res = CLOUDWATCH_CLIENT.get_metric_data(
+    MetricDataQueries=[query],
+    StartTime=start_time,
+    EndTime=end_time
+  )
+  return res["MetricDataResults"]
+
+def process_total(bucket_name, metrics_data):
+  summary = {}
+  for each in metrics_data:
+    key = f'{bucket_name}-{each["Id"]}'
+    summary[key] = {}
+    timestamps = each["Timestamps"]
+    for idx, timestamp in enumerate(timestamps):
+      month = str(timestamp).split(" ")[0][:-3]
+      if month not in summary[key]:
+        summary[key][month] = 0
+      summary[key][month] += each["Values"][idx]
+    for month, value in summary[key].items():
+      summary[key][month] = f'{round(value / (1024 * 1024 * 1024), 2)}GB'
+    summary[key] = dict(sorted(summary[key].items()))
+  return summary
+
+def process_difference(bucket_name, metrics_data):
+  summary_total = process_total(bucket_name, metrics_data)
+  summary_difference = {}
+  for key, values in summary_total.items():
+    summary_difference[key] = {}
+    prev_month = None
+    for month, value in values.items():
+      if prev_month is not None:
+        current_month_value = float(value.replace("GB", ""))
+        prev_month_value = float(values[prev_month].replace("GB", ""))
+        difference = round(current_month_value - prev_month_value, 2)
+        summary_difference[key][month] = f'{difference}GB'
+      prev_month = month
+  return summary_difference
+
+def process_average_of_difference(bucket_name, metrics_data):
+  summary_difference = process_difference(bucket_name, metrics_data)
+  summary_average_of_difference = {}
+  for key, values in summary_difference.items():
+    total = 0
+    for month, value in values.items():
+      current_month_value = float(value.replace("GB", ""))
+      if current_month_value >= 0:
+        total += current_month_value
+    average = round(total / len(values), 2)
+    summary_average_of_difference[key] = f'{average}GB'
+  return summary_average_of_difference
+
+def parse_args():
+  parser = argparse.ArgumentParser(
+    prog="find_s3_monthly_object_sizes",
+    description="Utility to find monthly object sizes of an S3 bucket",
+    formatter_class=argparse.RawTextHelpFormatter
+  )
+  parser.add_argument("--bucket", help="Name of S3 bucket", required=True)
+  parser.add_argument("--start", help="Start Month. Format: YYYY-MM", required=True)
+  parser.add_argument("--end", help="End Month. Format: YYYY-MM", required=True)
+
+  help_str = '''Possible values: TOTAL, DIFF, AVG_OF_DIFF
+TOTAL: Show monthly total size of all objects in S3 Bucket
+DIFF: Show monthly total size of NEW objects being added to S3 Bucket
+AVG_OF_DIFF: Show average of size of NEW objects being added to S3 Bucket
+  '''
+  parser.add_argument("--mode", help=help_str, required=True) 
+  return parser.parse_args()
+
+if __name__ == "__main__":
+  args = parse_args()
+
+  bucket_name = args.bucket
+  start_time = datetime.strptime(args.start, "%Y-%m")
+  end_time = datetime.strptime(args.end, "%Y-%m")
+  mode = args.mode
+
+  res = {}
+  metrics_data = get_cloudwatch_metric_data_s3_bucket_size_bytes_for_single_s3_bucket(bucket_name, start_time, end_time)
+  if mode == "TOTAL":
+    res = process_total(bucket_name, metrics_data)
+  elif mode == "DIFF":
+    res = process_difference(bucket_name, metrics_data)
+  elif mode == "AVG_OF_DIFF":
+    res = process_average_of_difference(bucket_name, metrics_data)
+  else:
+    raise Exception("WRONG MODE")
+  print(json.dumps(res, indent=2))
