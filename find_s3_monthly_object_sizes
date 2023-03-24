@@ -64,11 +64,7 @@ def process_total(bucket_name, metrics_data):
     timestamps = each["Timestamps"]
     for idx, timestamp in enumerate(timestamps):
       month = str(timestamp).split(" ")[0][:-3]
-      if month not in summary[key]:
-        summary[key][month] = 0
-      summary[key][month] += each["Values"][idx]
-    for month, value in summary[key].items():
-      summary[key][month] = f'{round(value / (1024 * 1024 * 1024), 2)}GB'
+      summary[key][month] = f'{round(each["Values"][idx] / (1024 * 1024 * 1024), 2)}GB'
     summary[key] = dict(sorted(summary[key].items()))
   return summary
 
