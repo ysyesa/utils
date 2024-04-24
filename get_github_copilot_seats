@@ -1,0 +1,60 @@
+#!/usr/bin/env python
+"""This script helps to get GitHub Copilot seats
+Reference: https://docs.github.com/en/rest/copilot/copilot-user-management
+"""
+
+
+import json
+import os
+import requests
+import sys
+
+
+def call_github_api(url: str) -> dict:
+    """Call GitHub API
+
+    Args:
+        url:    URL
+
+    Returns:
+        data:   JSON Response
+    """
+    github_token = os.environ["GITHUB_TOKEN"]
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    res = requests.get(url, headers=headers, timeout=10)
+    if res.status_code != 200:
+        print(res.text)
+        sys.exit(1)
+    return res.json()
+
+
+def recursive_get_github_copilot_seats(github_org: str, copilot_seats: list, page: int=1):
+    """Recursively get GitHub Copilot seats
+
+    Args:
+        github_org:     Organization name
+        copilot_seats:  List of seats
+        page:           Page number
+
+    Returns:
+        seats:  List of seats
+    """
+    url = f"https://api.github.com/orgs/{github_org}/copilot/billing/seats?per_page=100&page={page}"
+    data = call_github_api(url)
+    copilot_seats += data["seats"]
+    if len(copilot_seats) < data["total_seats"]:
+        recursive_get_github_copilot_seats(github_org, copilot_seats, page + 1)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print(f"Usage: ./{os.path.basename(__file__)} <GITHUB_ORG>")
+        sys.exit(1)
+    org = sys.argv[1]
+
+    seats = []
+    recursive_get_github_copilot_seats(org, seats)
+    print(json.dumps(seats, indent=4))
